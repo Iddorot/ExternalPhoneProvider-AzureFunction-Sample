@@ -2437,6 +2437,7 @@ function Set-EppPublicAccess {
     # Send the deny default in the same request: Azure Policy can reject public access without it.
     Invoke-EppAz resource update --ids $SiteId --api-version 2024-04-01 --set "properties.publicNetworkAccess=$Access" `
         --set 'properties.siteConfig.ipSecurityRestrictionsDefaultAction=Deny' `
+        --set 'properties.siteConfig.scmIpSecurityRestrictionsDefaultAction=Deny' `
         --subscription $SubscriptionId --output none | Out-Null
     if ($Access -eq 'Disabled') { return }
     $config = Invoke-EppAz rest --method get --url "https://management.azure.com$SiteId/config/web?api-version=2024-04-01" `
@@ -2445,7 +2446,8 @@ function Set-EppPublicAccess {
     $allowRules = @(if ($properties -is [Collections.IDictionary]) {
         @($properties['ipSecurityRestrictions']) | Where-Object { $_ -is [Collections.IDictionary] -and $_['action'] -eq 'Allow' }
     })
-    if ($properties -isnot [Collections.IDictionary] -or $properties['ipSecurityRestrictionsDefaultAction'] -ne 'Deny' -or -not $allowRules.Count) {
+    if ($properties -isnot [Collections.IDictionary] -or $properties['ipSecurityRestrictionsDefaultAction'] -ne 'Deny' -or
+        $properties['scmIpSecurityRestrictionsDefaultAction'] -ne 'Deny' -or -not $allowRules.Count) {
         Set-EppPublicAccess -SiteId $SiteId -SubscriptionId $SubscriptionId -Access Disabled
         throw 'Public ingress was enabled without the approved access restrictions, so setup closed it again. Inspect the Function App access restrictions.'
     }

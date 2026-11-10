@@ -242,16 +242,17 @@ try {
 
         $siteId = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Web/sites/app'
         $script:Calls.Clear()
-        $script:WebConfig = @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; ipSecurityRestrictions = @(@{ action = 'Allow'; ipAddress = 'AzureActiveDirectory' }) } }
+        $script:WebConfig = @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; scmIpSecurityRestrictionsDefaultAction = 'Deny'; ipSecurityRestrictions = @(@{ action = 'Allow'; ipAddress = 'AzureActiveDirectory' }) } }
         Set-EppPublicAccess -SiteId $siteId -SubscriptionId s -Access Enabled
-        Assert ($script:Calls[0].Contains('--set properties.publicNetworkAccess=Enabled --set properties.siteConfig.ipSecurityRestrictionsDefaultAction=Deny')) 'Open ingress together with the deny default.'
+        Assert ($script:Calls[0].Contains('--set properties.publicNetworkAccess=Enabled --set properties.siteConfig.ipSecurityRestrictionsDefaultAction=Deny --set properties.siteConfig.scmIpSecurityRestrictionsDefaultAction=Deny')) 'Open ingress together with the site and SCM deny defaults.'
         Assert ($script:Calls.Count -eq 2 -and $script:Calls[1] -like 'rest --method get *config/web*') 'Read back the access restrictions after opening ingress.'
         $script:Calls.Clear()
         Set-EppPublicAccess -SiteId $siteId -SubscriptionId s -Access Disabled
         Assert ($script:Calls.Count -eq 1 -and $script:Calls[0].Contains('publicNetworkAccess=Disabled')) 'Closing ingress needs no read-back.'
         foreach ($unsafe in @(
             @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Allow'; ipSecurityRestrictions = @(@{ action = 'Allow' }) } },
-            @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; ipSecurityRestrictions = @(@{ action = 'Deny' }) } },
+            @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; scmIpSecurityRestrictionsDefaultAction = 'Deny'; ipSecurityRestrictions = @(@{ action = 'Deny' }) } },
+            @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; scmIpSecurityRestrictionsDefaultAction = 'Allow'; ipSecurityRestrictions = @(@{ action = 'Allow' }) } },
             @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny' } })) {
             $script:WebConfig = $unsafe; $script:Calls.Clear()
             Assert-Throws { Set-EppPublicAccess -SiteId $siteId -SubscriptionId s -Access Enabled } 'setup closed it again'
