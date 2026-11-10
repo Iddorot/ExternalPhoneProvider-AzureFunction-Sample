@@ -7,6 +7,22 @@ that use **OAuth through managed identity federation**.
 Guided setup deploys one regional endpoint with one provider. Choose JavaScript, C#, or Python;
 JavaScript is the default.
 
+> [!IMPORTANT]
+> **This is a network-secured fork of
+> [Azure-Samples/ExternalPhoneProvider-AzureFunction-Sample](https://github.com/Azure-Samples/ExternalPhoneProvider-AzureFunction-Sample).**
+> In the original, the storage account and Key Vault accept traffic from every network. Azure
+> Policy rules that require firewalls on those resources (`RequestDisallowedByPolicy`) block that
+> deployment. This fork deploys them locked down:
+>
+> - Storage and Key Vault **deny public network access by default**.
+> - The Function App joins a dedicated **virtual network** and reaches Storage and Key Vault
+>   through subnet **service endpoints**.
+> - Only the computer running setup is allowed in, by its public IPv4 address, so it can upload
+>   the package and manage the certificate. Set it with `-OperatorIpAddress` or let setup detect it.
+>
+> Setup scripts and Function packages download from this repository, not the Microsoft one.
+> See [network access](setup/docs/README.md#network-access) for details.
+
 ## Quick start
 
 **[Start onboarding: download and run the setup script](docs/GETTING-STARTED.md#2-download-and-run-the-setup-script)**
