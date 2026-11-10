@@ -53,6 +53,9 @@
     Versioned Key Vault certificate URL for reuse, not a public certificate file or secret value.
 .PARAMETER KeyVaultSubscriptionId
     Subscription containing the reused certificate's vault. Defaults to the deployment subscription.
+.PARAMETER OperatorIpAddress
+    Public IPv4 address that Storage and Key Vault allow so setup can upload the package and manage
+    the certificate. Both deny other public traffic. Detected from https://api.ipify.org when omitted.
 .EXAMPLE
     .\Setup-Epp.ps1
 .EXAMPLE
@@ -79,6 +82,7 @@ param(
     [string] $SourceRepository = 'Iddorot/ExternalPhoneProvider-AzureFunction-Sample',
     [string] $SourceRef = 'main',
     [string] $PackageReleaseTag,
+    [string] $OperatorIpAddress,
     [switch] $NonInteractive,
     [switch] $InstallPrerequisites,
     [switch] $ForceAuthentication,

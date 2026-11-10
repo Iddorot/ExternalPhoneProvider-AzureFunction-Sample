@@ -100,6 +100,7 @@ try {
             SourceRevision = ('a' * 40)
             SourceBaseUri = "https://raw.githubusercontent.com/Iddorot/ExternalPhoneProvider-AzureFunction-Sample/$('a' * 40)/setup"
             PackageSha256 = ('a' * 64); SourcePackageSha256 = ('a' * 64)
+            OperatorIpAddress = '203.0.113.10'
         }
         $names = Get-EppResourceNames -SubscriptionId $inputs.SubscriptionId -ApplicationId $inputs.ApplicationId -ResourcePrefix unit
         $provider = @{
@@ -144,6 +145,8 @@ try {
                 Assert (-not $plan.Contains($setting)) 'The approval must not advertise obsolete cache settings.'
             }
             Assert ($plan.Contains('Deploy the verified package, synchronize Function triggers, and enable HTTPS ingress after Easy Auth is verified.')) 'Describe the package publication result and authentication requirement.'
+            Assert ($plan.Contains('Storage and Key Vault deny public network access by default.') -and $plan.Contains($names.virtualNetwork) -and
+                $plan.Contains("public IPv4 address 203.0.113.10")) 'The approval must disclose the network restrictions, virtual network, and allowed operator address.'
             $script:Calls.Clear()
             Assert-EppServicePlanLocation -Inputs $inputs
             Assert ($script:Calls.Count -eq 1) 'Availability must check only the selected plan.'
@@ -194,6 +197,34 @@ try {
             $script:CliVersion = if ($id -eq 'FC1') { '2.60.0' } else { '2.48.1' }
             Assert-Throws { Connect-EppContext -Inputs $inputs -Names $names -NonInteractive } 'passed-version-check'
         }
+
+        foreach ($valid in @('203.0.113.10', ' 8.8.8.8 ')) {
+            Assert ((Resolve-EppOperatorIpAddress -OperatorIpAddress $valid) -ceq $valid.Trim()) 'Accept a supplied public IPv4 address.'
+        }
+        foreach ($invalid in @('10.1.2.3', '172.16.0.1', '192.168.1.1', '127.0.0.1', '100.64.0.1', '169.254.1.1', '224.0.0.1')) {
+            Assert-Throws { Resolve-EppOperatorIpAddress -OperatorIpAddress $invalid } 'not a public IPv4 address'
+        }
+        foreach ($invalid in @('2001:db8::1', '1.2.3', 'example.com')) {
+            Assert-Throws { Resolve-EppOperatorIpAddress -OperatorIpAddress $invalid } 'not an IPv4 address'
+        }
+        function script:Invoke-RestMethod { param($Uri, $TimeoutSec); Assert ($Uri -ceq 'https://api.ipify.org') 'Detect the address from one fixed service.'; return "198.51.100.7`n" }
+        Assert ((Resolve-EppOperatorIpAddress) -ceq '198.51.100.7') 'Detect the public address when none is supplied.'
+        function script:Invoke-RestMethod { throw 'offline' }
+        Assert-Throws { Resolve-EppOperatorIpAddress } 'Rerun setup with -OperatorIpAddress'
+
+        function script:Start-Sleep { param($Seconds) }
+        $script:DataAttempts = 0
+        $value = Invoke-EppDataOperation { $script:DataAttempts++; if ($script:DataAttempts -lt 3) { throw 'ErrorCode:AuthorizationFailure' }; 'uploaded' } 3>$null
+        Assert ($value -ceq 'uploaded' -and $script:DataAttempts -eq 3) 'Retry while new Storage network rules apply.'
+        Assert-Throws { Invoke-EppDataOperation { throw '(Forbidden) Client address is not authorized and caller is not a trusted service. Code: ForbiddenByFirewall' } 3>$null } 'rejected this computer''s network address'
+        $script:DataAttempts = 0
+        Assert-Throws { Invoke-EppDataOperation { $script:DataAttempts++; throw 'other-failure' } } '^other-failure$'
+        Assert ($script:DataAttempts -eq 1) 'Do not retry unrelated failures.'
+        Remove-Item Function:\Start-Sleep
+        $flexProviders = @((Get-EppResourceProviderRequirements -ServicePlan FC1).Namespace)
+        $premiumProviders = @((Get-EppResourceProviderRequirements -ServicePlan EP1).Namespace)
+        Assert ($flexProviders -contains 'Microsoft.Network' -and $premiumProviders -contains 'Microsoft.Network') 'Both plans need the virtual network provider.'
+        Assert ($flexProviders -contains 'Microsoft.App' -and $premiumProviders -notcontains 'Microsoft.App') 'Only Flex needs the Microsoft.App subnet delegation provider.'
 
         function script:Assert-EppAuthentication {
             param($SiteId, $Inputs, $Context, $IdentifierUri)
@@ -281,6 +312,7 @@ try {
             } 'stop-after-parameters'
             Assert ($script:Activities -contains 'Deploying Azure resources') 'ARM deployment must use the shared activity indicator.'
             Assert ($script:DeploymentParameters.servicePlan.value -ceq $id) 'The approved plan must be passed to Bicep.'
+            Assert ($script:DeploymentParameters.operatorIpAddress.value -ceq '203.0.113.10') 'The approved operator address must be passed to Bicep.'
             foreach ($setting in @('EPP_PROVIDER_SMS_ENDPOINT', 'EPP_PROVIDER_VOICE_ENDPOINT', 'EPP_PROVIDER_TENANT_ID', 'EPP_PROVIDER_SCOPE')) {
                 Assert ($script:DeploymentParameters.providerSettings.value[$setting] -ceq $provider.Settings[$setting]) 'Approved endpoints and OAuth settings must be passed to Bicep.'
             }
@@ -312,6 +344,19 @@ try {
             $functionAppConfig = $site.functionAppConfig
             Assert ($functionAppConfig -is [string] -and $functionAppConfig.StartsWith("[if(variables('isFlexConsumption'), ") -and $functionAppConfig.EndsWith(', null())]')) 'Only functionAppConfig must be conditional on FC1, with no Flex configuration for EP1.'
             Assert ($functionAppConfig.Contains("'deployment', createObject('storage', createObject('type', 'blobContainer'") -and $functionAppConfig.Contains("reference(resourceId('Microsoft.Storage/storageAccounts', parameters('resourceNames').storageAccount), '2023-05-01').primaryEndpoints.blob")) 'Flex must retain its deployment container and storage endpoint lookup.'
+            Assert ($inner.variables.functionSubnetId -ceq "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('resourceNames').virtualNetwork, 'functions')]" -and
+                $site.virtualNetworkSubnetId -ceq "[variables('functionSubnetId')]") 'The Function App must join the delegated subnet.'
+            Assert ($site.siteConfig.Contains("'vnetRouteAllEnabled', true()")) 'Premium must route all outbound traffic through the virtual network.'
+            Assert ($inner.variables.subnetDelegation -ceq "[if(variables('isFlexConsumption'), 'Microsoft.App/environments', 'Microsoft.Web/serverFarms')]") 'Delegate the subnet for the selected plan.'
+            $subnet = (($inner.resources | Where-Object type -eq 'Microsoft.Network/virtualNetworks').properties.subnets)[0].properties
+            Assert ((@($subnet.serviceEndpoints.service) -join ',') -ceq 'Microsoft.Storage,Microsoft.KeyVault') 'The subnet must enable Storage and Key Vault service endpoints.'
+            foreach ($type in @('Microsoft.Storage/storageAccounts', 'Microsoft.KeyVault/vaults')) {
+                $acls = ($inner.resources | Where-Object type -eq $type).properties.networkAcls
+                Assert ($acls.defaultAction -ceq 'Deny' -and $acls.bypass -ceq 'AzureServices') "$type must deny public network traffic by default."
+                Assert (@($acls.virtualNetworkRules).Count -eq 1 -and $acls.virtualNetworkRules[0].id -ceq "[variables('functionSubnetId')]") "$type must allow only the Function subnet."
+                $ipCopy = @($acls.copy | Where-Object name -eq 'ipRules')
+                Assert ($ipCopy.Count -eq 1 -and $ipCopy[0].count -ceq "[length(variables('operatorIpRules'))]") "$type must allow the setup operator address."
+            }
             Assert ($functionAppConfig.Contains("'runtime', createObject('name', variables('runtime').worker, 'version', variables('runtime').version)")) 'Flex must use the selected runtime name and version.'
             Assert ($functionAppConfig.Contains("'instanceMemoryMB', 2048, 'maximumInstanceCount', 40, 'alwaysReady', createArray()") -and $functionAppConfig.Contains("'type', 'SystemAssignedIdentity'")) 'Flex must retain 2048 MB, up to 40 on-demand instances, zero always-ready instances, and managed-identity deployment storage.'
         }

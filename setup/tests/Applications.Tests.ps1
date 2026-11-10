@@ -248,7 +248,7 @@ try {
         }
         $setup = @{
             TenantId = $script:Tenant; SubscriptionId = $script:Subscription
-            Location = 'westus2'; ServicePlan = 'FC1'; ResourcePrefix = 'unit'
+            Location = 'westus2'; ServicePlan = 'FC1'; ResourcePrefix = 'unit'; OperatorIpAddress = '203.0.113.10'
             AssetDirectory = $ModulePath; OutputDirectory = $Directory
             SourceBaseUri = "https://raw.githubusercontent.com/Iddorot/ExternalPhoneProvider-AzureFunction-Sample/$('a' * 40)/setup"
         }

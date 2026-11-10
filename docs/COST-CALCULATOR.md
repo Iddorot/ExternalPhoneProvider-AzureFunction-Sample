@@ -254,6 +254,7 @@ regional prices. Measure execution duration and telemetry volume during your pil
 | Application Insights and Log Analytics | Provides operational monitoring, request diagnostics, provider latency, failure data, and troubleshooting telemetry. | Telemetry volume and retention. |
 | Storage account | Stores Function host information and the deployment package. Setup uses Standard LRS storage. | Stored capacity and transactions. |
 | Key Vault | Holds the encryption certificate and its private-key backing secret. | Certificate and secret operations. |
+| Virtual network | Connects the Function App to Storage and Key Vault through service endpoints. | No separate charge for the virtual network or service endpoints. |
 | Outbound bandwidth | Carries API requests and responses between Azure Functions and the provider. | Outbound data after the applicable Azure allowance. This is usually small for provider API payloads. |
 
 Collect these inputs before creating your estimate:

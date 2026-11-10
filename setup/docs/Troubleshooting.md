@@ -13,6 +13,7 @@ deployment inputs when retrying.
 | Permission or prerequisite failure | [Permissions and tools](#permissions-and-tools) |
 | Region, plan, or quota failure | [Regional availability](#regional-availability-and-quota) |
 | Resource-provider registration failure | [Resource providers](#a-required-azure-resource-provider-is-not-registered) |
+| `RequestDisallowedByPolicy`, `AuthorizationFailure`, or `ForbiddenByFirewall` | [Network access](#storage-or-key-vault-rejects-setup) |
 | Certificate selection or decryption failure | [Certificates](#certificate-selection-reuse-or-cleanup-fails) |
 | Download, checksum, or startup failure | [Packages](#package-download-or-startup-fails) |
 | Failure after deployment approval | [Recovery](#recover-without-destructive-cleanup) |
@@ -148,11 +149,24 @@ before sharing an existing app.
 Setup checks these subscription registrations:
 
 `Microsoft.Web`, `Microsoft.Storage`, `Microsoft.KeyVault`, `Microsoft.OperationalInsights`,
-`Microsoft.Insights`, and `Microsoft.ManagedIdentity`.
+`Microsoft.Insights`, `Microsoft.ManagedIdentity`, and `Microsoft.Network`. FC1 also needs
+`Microsoft.App` for its subnet delegation.
 
 Missing providers are registered after deployment approval. The operator needs subscription-scoped
 `/register/action`, included in Contributor and Owner. Fix permission or regional-availability
 errors and rerun; completed registrations remain in place.
+
+## Storage or Key Vault rejects setup
+
+Storage and Key Vault deny public network access by default. See [network access](README.md#network-access).
+
+| Symptom | Fix |
+| --- | --- |
+| `RequestDisallowedByPolicy` for the storage account or key vault | Rerun with the current setup source. Earlier versions created both resources open to every network. |
+| `AuthorizationFailure` or `ForbiddenByFirewall` after the infrastructure stage | Setup retries for about two minutes while network rules apply. If it still fails, the computer's public IPv4 address differs from the one in the plan. Rerun with the correct `-OperatorIpAddress`, or run from another computer. |
+| Rejected from Azure Cloud Shell | Storage ignores IP rules for requests from the same Azure region. Run setup from a computer outside Azure or a Cloud Shell in another region. |
+| Rerun from a new address fails while reading an existing certificate | The previous address is still the one allowed. Add the new address under **Key Vault** > **Networking**, or run from the original computer. |
+| Function can't start or resolve Key Vault references | Confirm the Function App is integrated with subnet `functions` and that the subnet keeps its Storage and Key Vault service endpoints. |
 
 ## Certificate selection, reuse, or cleanup fails
 
