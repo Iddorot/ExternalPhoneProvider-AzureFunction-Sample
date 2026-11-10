@@ -31,6 +31,7 @@ try {
         $script:Answers = [Collections.Generic.Queue[string]]::new()
         $script:ReferenceStates = [Collections.Generic.Queue[string]]::new()
         $script:ReferenceStatus = 'Resolved'
+        $script:RefreshBusy = 0
         $script:ReferenceOverride = @{}
         $script:ReferenceError = ''
         $script:AccessError = ''
@@ -119,6 +120,10 @@ try {
                 }
                 '^rest --method post .*configreferences/appsettings/refresh' {
                     if ($script:ReferenceError) { throw $script:ReferenceError }
+                    if ($script:RefreshBusy -gt 0) {
+                        $script:RefreshBusy--
+                        throw 'Conflict: Cannot refresh keyvault references for this site because another operation is in progress.'
+                    }
                 }
                 '^rest --method get .*configreferences/appsettings/EPP_DECRYPTION_KEY_PEM' {
                     $secret = ConvertTo-EppKeyVaultObjectId $script:Bundle.sid secrets
@@ -437,6 +442,13 @@ try {
             $script:ReferenceStates.Enqueue('AccessToKeyVaultDenied'); $script:Sleeps = 0
             Assert-EppEncryptionReference @referenceArgs
             Assert ($script:Sleeps -eq 1) 'Retry transient role propagation, then verify successful resolution.'
+            $script:RefreshBusy = 2; $script:Sleeps = 0
+            Assert-EppEncryptionReference @referenceArgs 3>$null
+            Assert ($script:Sleeps -eq 2 -and $script:RefreshBusy -eq 0) 'Wait while the Function App finishes another operation, then refresh.'
+            $script:RefreshBusy = 31; $script:Sleeps = 0
+            Assert-Throws { Assert-EppEncryptionReference @referenceArgs 3>$null } 'another operation is in progress'
+            Assert ($script:Sleeps -eq 30) 'Stop waiting for a busy Function App after the bounded limit.'
+            $script:RefreshBusy = 0
             $script:ReferenceOverride = @{ activeVersion = ('c' * 32) }
             Assert-Throws { Assert-EppEncryptionReference @referenceArgs } 'different secret reference or version'
             $script:ReferenceOverride = @{ status = $null }

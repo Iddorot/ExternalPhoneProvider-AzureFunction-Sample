@@ -2257,9 +2257,21 @@ function Assert-EppEncryptionReference {
         throw 'The Function encryption key ID does not match the approved certificate plan.'
     }
     $url = "https://management.azure.com/subscriptions/$($Inputs.SubscriptionId)/resourceGroups/$($Names.resourceGroup)/providers/Microsoft.Web/sites/$($Names.functionApp)/config/configreferences/appsettings"
+    $busyWaits = 0
     for ($attempt = 1; $attempt -le 12; $attempt++) {
-        Invoke-EppAz rest --method post --url "$url/refresh?api-version=2024-04-01" `
-            --subscription $Inputs.SubscriptionId --output none | Out-Null
+        try {
+            Invoke-EppAz rest --method post --url "$url/refresh?api-version=2024-04-01" `
+                --subscription $Inputs.SubscriptionId --output none | Out-Null
+        }
+        catch {
+            # App Service rejects a refresh while it is still applying the settings update or restart.
+            if ($_.Exception.Message -notmatch 'another operation is in progress' -or $busyWaits -ge 30) { throw }
+            $busyWaits++
+            $attempt--
+            Write-Warning "Waiting for the Function App to finish its current operation ($busyWaits/30)."
+            Start-Sleep -Seconds 10
+            continue
+        }
         $reference = Invoke-EppAz rest --method get --url "$url/EPP_DECRYPTION_KEY_PEM`?api-version=2024-04-01" `
             --subscription $Inputs.SubscriptionId --output json | ConvertFrom-Json -AsHashtable
         if ($reference -isnot [Collections.IDictionary]) {
