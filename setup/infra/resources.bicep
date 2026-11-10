@@ -11,6 +11,8 @@ param language string
 param remoteBuild bool
 @description('Public IPv4 address of the setup operator. Storage and Key Vault allow it so setup can upload the package and issue the certificate.')
 param operatorIpAddress string
+@description('App Service access-restriction allow rules for callers of the endpoint. Unmatched requests are denied.')
+param callerAccessRules array
 @allowed(['FC1', 'EP1'])
 param servicePlan string = 'EP1'
 
@@ -39,6 +41,15 @@ var runtime = runtimes[language]
 // a delegated subnet with service endpoints; the setup operator is allowed by IP address.
 var subnetDelegation = isFlexConsumption ? 'Microsoft.App/environments' : 'Microsoft.Web/serverFarms'
 var operatorIpRules = empty(operatorIpAddress) ? [] : [operatorIpAddress]
+// The deployment (SCM) endpoint accepts only the setup operator.
+var operatorAccessRules = empty(operatorIpAddress) ? [] : [
+  {
+    name: 'Setup operator'
+    action: 'Allow'
+    priority: 100
+    ipAddress: '${operatorIpAddress}/32'
+  }
+]
 
 var tags = {
   managedBy: 'EPP-Setup'
@@ -240,6 +251,11 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
     siteConfig: union({
       http20Enabled: true
       minTlsVersion: '1.2'
+      ipSecurityRestrictionsDefaultAction: 'Deny'
+      ipSecurityRestrictions: callerAccessRules
+      scmIpSecurityRestrictionsUseMain: false
+      scmIpSecurityRestrictionsDefaultAction: 'Deny'
+      scmIpSecurityRestrictions: operatorAccessRules
     }, isFlexConsumption ? {} : {
       alwaysOn: true
       vnetRouteAllEnabled: true

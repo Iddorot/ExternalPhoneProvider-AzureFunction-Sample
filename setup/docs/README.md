@@ -94,6 +94,23 @@ Policy rules that block storage accounts and key vaults open to every network.
 | Computer running setup | Its public IPv4 address, detected from `https://api.ipify.org` or supplied with `-OperatorIpAddress`. Setup needs it to upload the EP1 package and to issue and read the certificate. |
 | Trusted Azure services | The `AzureServices` firewall bypass. |
 
+The Function App also restricts who can reach it, so it satisfies policies that block web apps
+with unrestricted public access:
+
+| Endpoint | Allowed | Unmatched requests |
+| --- | --- | --- |
+| Function (`https://<app>.azurewebsites.net`) | `-AllowedCallers`: Azure service tags or public IPv4 addresses/ranges. Default `AzureActiveDirectory`. | Denied |
+| Deployment (SCM / Kudu) | The computer running setup | Denied |
+
+Easy Auth still requires the Microsoft phone-provider application's token on every request.
+
+> [!WARNING]
+> Microsoft doesn't publish the addresses Microsoft Entra ID uses to call external phone
+> providers. The `AzureActiveDirectory` service tag is the expected source, not a documented one.
+> After deployment, send an [evaluation request](../../docs/GETTING-STARTED.md) and check the
+> Function's logs. A `403 Ip Forbidden` response or no request in the logs means the caller was
+> blocked. Rerun setup with the correct `-AllowedCallers` values before you activate the policy.
+
 The virtual network and service endpoints have no separate Azure charge. Each run replaces the
 allowed IPv4 address with the address of the computer running setup; the address stays allowed
 after setup completes. Remove it from **Networking** on both resources if you don't want it kept.
@@ -353,6 +370,7 @@ For deliberate replacement, use `-CertificateAction Replace` instead.
 | `-OutputDirectory` | Private output folder; default is `epp-output` beside the launcher |
 | `-PassThru` | Return the structured deployment result in addition to saving it |
 | `-OperatorIpAddress` | Public IPv4 address to allow through the Storage and Key Vault firewalls; detected when omitted. See [network access](#network-access). |
+| `-AllowedCallers` | Service tags or public IPv4 addresses/ranges allowed to call the Function. Default `AzureActiveDirectory`. See [network access](#network-access). |
 | `-SourceRepository`, `-SourceRef`, `-PackageReleaseTag` | Pin [source and packages](#source-versioning) |
 
 ## Source versioning
