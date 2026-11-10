@@ -9,6 +9,8 @@ param providerSettings object
 param packageBlobName string
 param language string
 param remoteBuild bool
+@description('Public IPv4 address of the setup operator. Storage and Key Vault allow it so setup can upload the package and issue the certificate.')
+param operatorIpAddress string
 @allowed(['FC1', 'EP1'])
 param servicePlan string = 'EP1'
 
@@ -32,6 +34,11 @@ var runtimes = {
   }
 }
 var runtime = runtimes[language]
+
+// Storage and Key Vault deny public network traffic. The Function App reaches them through
+// a delegated subnet with service endpoints; the setup operator is allowed by IP address.
+var subnetDelegation = isFlexConsumption ? 'Microsoft.App/environments' : 'Microsoft.Web/serverFarms'
+var operatorIpRules = empty(operatorIpAddress) ? [] : [operatorIpAddress]
 
 var tags = {
   managedBy: 'EPP-Setup'
@@ -80,6 +87,39 @@ resource insights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
+resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
+  name: resourceNames.virtualNetwork
+  location: location
+  tags: tags
+  properties: {
+    addressSpace: {
+      addressPrefixes: ['10.0.0.0/24']
+    }
+    subnets: [
+      {
+        name: 'functions'
+        properties: {
+          addressPrefix: '10.0.0.0/25'
+          delegations: [
+            {
+              name: 'functions'
+              properties: {
+                serviceName: subnetDelegation
+              }
+            }
+          ]
+          serviceEndpoints: [
+            { service: 'Microsoft.Storage' }
+            { service: 'Microsoft.KeyVault' }
+          ]
+        }
+      }
+    ]
+  }
+}
+
+var functionSubnetId = resourceId('Microsoft.Network/virtualNetworks/subnets', virtualNetwork.name, 'functions')
+
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: resourceNames.storageAccount
   location: location
@@ -96,6 +136,20 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     defaultToOAuthAuthentication: true
     minimumTlsVersion: 'TLS1_2'
     publicNetworkAccess: 'Enabled'
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices'
+      virtualNetworkRules: [
+        {
+          id: functionSubnetId
+          action: 'Allow'
+        }
+      ]
+      ipRules: [for ip in operatorIpRules: {
+        value: ip
+        action: 'Allow'
+      }]
+    }
     supportsHttpsTrafficOnly: true
   }
 }
@@ -124,6 +178,18 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
     publicNetworkAccess: 'Enabled'
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices'
+      virtualNetworkRules: [
+        {
+          id: functionSubnetId
+        }
+      ]
+      ipRules: [for ip in operatorIpRules: {
+        value: ip
+      }]
+    }
     sku: {
       family: 'A'
       name: 'standard'
@@ -167,6 +233,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
     serverFarmId: plan.id
     httpsOnly: true
     keyVaultReferenceIdentity: 'SystemAssigned'
+    // Storage, Key Vault references, and the package download go through the delegated subnet.
+    virtualNetworkSubnetId: functionSubnetId
     // The script verifies Easy Auth before opening ingress for publication.
     publicNetworkAccess: 'Disabled'
     siteConfig: union({
@@ -174,6 +242,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       minTlsVersion: '1.2'
     }, isFlexConsumption ? {} : {
       alwaysOn: true
+      vnetRouteAllEnabled: true
       minimumElasticInstanceCount: 1
       ftpsState: 'Disabled'
       linuxFxVersion: runtime.stack
@@ -376,6 +445,7 @@ resource ftpCredentials 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@
 output functionAppName string = functionApp.name
 output storageAccountName string = storage.name
 output keyVaultName string = vault.name
+output virtualNetworkName string = virtualNetwork.name
 output outboundPrincipalId string = outboundIdentity.properties.principalId
 output endpointUrl string = 'https://${functionApp.properties.defaultHostName}/api/SendOtp'
 output identifierUri string = identifierUri

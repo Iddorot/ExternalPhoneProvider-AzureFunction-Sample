@@ -408,6 +408,7 @@ function Get-EppResourceNames {
         logAnalytics = "$ResourcePrefix-epp-logs-$suffix"
         applicationInsights = "$ResourcePrefix-epp-insights-$suffix"
         outboundIdentity = "$ResourcePrefix-epp-outbound-$suffix"
+        virtualNetwork = "$ResourcePrefix-epp-vnet-$suffix"
     }
 }
 
@@ -497,14 +498,57 @@ function Invoke-EppAz {
 function Invoke-EppDataOperation {
     param([scriptblock] $Operation)
 
+    $roleDelay = 'ForbiddenByRbac|AuthorizationPermissionMismatch|Caller is not authorized to perform action on resource'
+    # Storage reports AuthorizationFailure and Key Vault reports ForbiddenByFirewall until new network rules apply.
+    $firewallDelay = 'AuthorizationFailure|ForbiddenByFirewall|Client address is not authorized'
     for ($attempt = 1; $attempt -le 12; $attempt++) {
         try { return & $Operation }
         catch {
-            if ($attempt -eq 12 -or $_.Exception.Message -notmatch 'ForbiddenByRbac|AuthorizationPermissionMismatch|Caller is not authorized to perform action on resource') { throw }
-            Write-Warning "Waiting for the new data-plane role assignment ($attempt/12)."
+            $message = $_.Exception.Message
+            $firewall = $message -match $firewallDelay
+            if (-not $firewall -and $message -notmatch $roleDelay) { throw }
+            if ($attempt -eq 12) {
+                if (-not $firewall) { throw }
+                throw [InvalidOperationException]::new(
+                    'Storage or Key Vault rejected this computer''s network address. Setup allows only the address shown in the plan. ' +
+                    'If your public IPv4 address differs (VPN, proxy, or Azure Cloud Shell in the deployment region), ' +
+                    'rerun setup from another computer or pass the correct address with -OperatorIpAddress. ' + $message,
+                    $_.Exception)
+            }
+            $reason = if ($firewall) { 'network rules' } else { 'data-plane role assignment' }
+            Write-Warning "Waiting for the new $reason ($attempt/12)."
             Start-Sleep -Seconds 10
         }
     }
+}
+
+function Assert-EppOperatorIpAddress {
+    param([string] $IpAddress)
+
+    $value = "$IpAddress".Trim()
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($value, [ref]$address) -or
+        $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or $address.ToString() -cne $value) {
+        throw "'$value' is not an IPv4 address. Pass your public IPv4 address with -OperatorIpAddress, for example 203.0.113.10."
+    }
+    $b = $address.GetAddressBytes()
+    if ($b[0] -in @(0, 10, 127) -or $b[0] -ge 224 -or
+        ($b[0] -eq 100 -and $b[1] -ge 64 -and $b[1] -le 127) -or ($b[0] -eq 169 -and $b[1] -eq 254) -or
+        ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31) -or ($b[0] -eq 192 -and $b[1] -eq 168)) {
+        throw "'$value' is not a public IPv4 address. Storage and Key Vault firewalls accept only public addresses."
+    }
+    return $value
+}
+
+function Resolve-EppOperatorIpAddress {
+    param([string] $OperatorIpAddress)
+
+    if (-not [string]::IsNullOrWhiteSpace($OperatorIpAddress)) { return Assert-EppOperatorIpAddress $OperatorIpAddress }
+    try { $detected = [string](Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 30) }
+    catch {
+        throw "Could not detect this computer's public IPv4 address. Rerun setup with -OperatorIpAddress <your public IPv4 address>. $($_.Exception.Message)"
+    }
+    return Assert-EppOperatorIpAddress $detected
 }
 
 function Confirm-EppPrerequisiteInstall {
@@ -1074,6 +1118,8 @@ function Set-EppProviderTenantRestriction {
 }
 
 function Get-EppResourceProviderRequirements {
+    param([string] $ServicePlan)
+
     @(
         @{ Namespace = 'Microsoft.Web'; Type = 'sites' }
         @{ Namespace = 'Microsoft.Storage'; Type = 'storageAccounts' }
@@ -1081,13 +1127,16 @@ function Get-EppResourceProviderRequirements {
         @{ Namespace = 'Microsoft.OperationalInsights'; Type = 'workspaces' }
         @{ Namespace = 'Microsoft.Insights'; Type = 'components' }
         @{ Namespace = 'Microsoft.ManagedIdentity'; Type = 'userAssignedIdentities' }
+        @{ Namespace = 'Microsoft.Network'; Type = 'virtualNetworks' }
+        # Flex Consumption virtual network integration uses a Microsoft.App/environments subnet delegation.
+        if ($ServicePlan -ne 'EP1') { @{ Namespace = 'Microsoft.App'; Type = 'managedEnvironments' } }
     )
 }
 
 function Get-EppResourceProviders {
-    param([string] $SubscriptionId)
+    param([string] $SubscriptionId, [string] $ServicePlan)
 
-    foreach ($provider in Get-EppResourceProviderRequirements) {
+    foreach ($provider in Get-EppResourceProviderRequirements -ServicePlan $ServicePlan) {
         $registration = Invoke-EppAz provider show --namespace $provider.Namespace --subscription $SubscriptionId --output json |
             ConvertFrom-Json
         if (-not $registration -or -not $registration.PSObject.Properties['registrationState'] -or
@@ -1233,7 +1282,7 @@ function Initialize-EppResourceProviders {
 
     $requested = @{}
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        $providers = @(Get-EppResourceProviders -SubscriptionId $Inputs.SubscriptionId)
+        $providers = @(Get-EppResourceProviders -SubscriptionId $Inputs.SubscriptionId -ServicePlan $Inputs.ServicePlan)
         Assert-EppProviderLocations -Providers $providers -Location $Inputs.Location
         foreach ($provider in $providers) {
             if ($provider.RegistrationState -eq 'NotRegistered' -and -not $requested.ContainsKey($provider.Namespace)) {
@@ -1360,7 +1409,7 @@ function Connect-EppContext {
 
     if (-not $pendingApplication) { Assert-EppResourceGroup -Inputs $Inputs -Names $Names }
 
-    $resourceProviders = @(Get-EppResourceProviders -SubscriptionId $Inputs.SubscriptionId)
+    $resourceProviders = @(Get-EppResourceProviders -SubscriptionId $Inputs.SubscriptionId -ServicePlan $Inputs.ServicePlan)
     Assert-EppProviderLocations -Providers $resourceProviders -Location $Inputs.Location
     $web = $resourceProviders | Where-Object Namespace -eq 'Microsoft.Web'
     if ($web.RegistrationState -eq 'Registered') {
@@ -1395,9 +1444,10 @@ function Get-EppResourceRows {
         [pscustomobject]@{ Resource = 'Resource group'; Name = $Names.resourceGroup; Description = 'Contains all Azure resources created by this deployment.' }
         [pscustomobject]@{ Resource = 'Function App'; Name = $Names.functionApp; Description = 'Hosts the External Phone Provider endpoint.' }
         [pscustomobject]@{ Resource = 'Hosting plan'; Name = $Names.hostingPlan; Description = $planDescription }
-        [pscustomobject]@{ Resource = 'Storage account'; Name = $Names.storageAccount; Description = 'Provides Function host storage and private package storage.' }
+        [pscustomobject]@{ Resource = 'Virtual network'; Name = $Names.virtualNetwork; Description = 'Connects the Function App to Storage and Key Vault through service endpoints.' }
+        [pscustomobject]@{ Resource = 'Storage account'; Name = $Names.storageAccount; Description = 'Provides Function host storage and private package storage. Public network access is denied.' }
         [pscustomobject]@{ Resource = 'Blob container'; Name = 'packages'; Description = 'Stores the verified deployment package privately.' }
-        [pscustomobject]@{ Resource = 'Key Vault'; Name = $Names.keyVault; Description = 'Stores provider credentials and newly issued encryption certificates.' }
+        [pscustomobject]@{ Resource = 'Key Vault'; Name = $Names.keyVault; Description = 'Stores provider credentials and newly issued encryption certificates. Public network access is denied.' }
         [pscustomobject]@{ Resource = 'Function App identity'; Name = 'System-assigned'; Description = 'Accesses package storage, host storage, Key Vault, and monitoring.' }
         [pscustomobject]@{ Resource = 'Outbound identity'; Name = $Names.outboundIdentity; Description = 'Supports outbound provider authentication when required.' }
         [pscustomobject]@{ Resource = 'Log Analytics'; Name = $Names.logAnalytics; Description = 'Stores platform and application diagnostic logs.' }
@@ -1481,6 +1531,14 @@ function Show-EppPlan {
     Write-Host "      $script:EppInvokeAppRoleValue - allows Microsoft to obtain an access token and call the Azure Function endpoint."
     Write-Host '      Microsoft Graph Application.Read.All - allows Microsoft to read the public encryption key from the endpoint application and encrypt request payloads.'
     Write-Host '      WARNING: Application.Read.All permits app-only reading of every application and enterprise application in this tenant.' -ForegroundColor Yellow
+
+    Write-Host "`nNetwork access" -ForegroundColor Cyan
+    Write-Host '  - Storage and Key Vault deny public network access by default.'
+    Write-Host "  - The Function App joins subnet 'functions' in $($Names.virtualNetwork) and reaches Storage and Key Vault through service endpoints."
+    if ($Inputs['OperatorIpAddress']) {
+        Write-Host "  - Allow this computer's public IPv4 address $($Inputs.OperatorIpAddress) so setup can upload the package and manage the certificate."
+        Write-Host '      Rerunning setup replaces the allowed address with the address of the computer running it.'
+    }
 
     Write-Host "`nEndpoint security" -ForegroundColor Cyan
     if (-not $Context.ProviderTenantRestricted) {
@@ -2475,6 +2533,7 @@ function Invoke-EppDeployment {
         packageBlobName = @{ value = "$($Inputs.PackageSha256).zip" }
         language = @{ value = $Inputs.Language }
         remoteBuild = @{ value = [bool]$Package.RequiresRemoteBuild }
+        operatorIpAddress = @{ value = [string]$Inputs['OperatorIpAddress'] }
         servicePlan = @{ value = $Inputs.ServicePlan }
     }
     $parameterPath = Join-Path $WorkingDirectory 'deployment.parameters.json'
@@ -2697,6 +2756,9 @@ function Invoke-EppSetup {
         Versioned Key Vault certificate URL for reuse, not a public certificate or secret value.
     .PARAMETER KeyVaultSubscriptionId
         Subscription containing the reused certificate. Defaults to the deployment subscription.
+    .PARAMETER OperatorIpAddress
+        Public IPv4 address allowed through the Storage and Key Vault firewalls while setup runs.
+        Detected automatically from https://api.ipify.org when omitted.
     .PARAMETER ForceAuthentication
         Explicitly request a new Azure CLI device-code sign-in. Omit in Cloud Shell to reuse
         its existing login. Graph always uses the resulting CLI session, never a separate SDK login.
@@ -2734,6 +2796,7 @@ function Invoke-EppSetup {
         [string] $AssetDirectory, [string] $SourceBaseUri,
         [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$')]
         [string] $SourceRepository = 'Iddorot/ExternalPhoneProvider-AzureFunction-Sample',
+        [string] $OperatorIpAddress,
         [switch] $NonInteractive, [switch] $InstallPrerequisites,
         [switch] $ForceAuthentication, [switch] $ApproveDeployment, [switch] $PassThru
     )
@@ -2839,6 +2902,7 @@ function Invoke-EppSetup {
         $inputs.SourcePackageSha256 = $package.SourceSha256
         $inputs.PackageUrl = $selection.Url
         $inputs.PackageReleaseTag = $selection.ReleaseTag
+        $inputs.OperatorIpAddress = Resolve-EppOperatorIpAddress -OperatorIpAddress $OperatorIpAddress
         Invoke-EppAz bicep build --file (Join-Path $assetDirectory 'infra/main.bicep') `
             --outfile (Join-Path $assetDirectory 'main.json') | Out-Null
         Show-EppPlan -Inputs $inputs -Names $names -ProviderConfiguration $providerConfiguration -Context $context

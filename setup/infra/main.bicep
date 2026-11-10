@@ -13,6 +13,8 @@ param packageBlobName string
 @allowed(['javascript', 'dotnet', 'python'])
 param language string
 param remoteBuild bool
+@description('Public IPv4 address of the setup operator, allowed through the Storage and Key Vault firewalls.')
+param operatorIpAddress string = ''
 @allowed(['FC1', 'EP1'])
 param servicePlan string = 'EP1'
 
@@ -45,6 +47,7 @@ module endpoint 'resources.bicep' = {
     packageBlobName: packageBlobName
     language: language
     remoteBuild: remoteBuild
+    operatorIpAddress: operatorIpAddress
     servicePlan: servicePlan
   }
 }
@@ -53,6 +56,7 @@ output resourceGroupName string = resourceGroup.name
 output functionAppName string = endpoint.outputs.functionAppName
 output storageAccountName string = endpoint.outputs.storageAccountName
 output keyVaultName string = endpoint.outputs.keyVaultName
+output virtualNetworkName string = endpoint.outputs.virtualNetworkName
 output outboundPrincipalId string = endpoint.outputs.outboundPrincipalId
 output endpointUrl string = endpoint.outputs.endpointUrl
 output identifierUri string = endpoint.outputs.identifierUri

@@ -26,6 +26,8 @@ Use the [documentation index](../../docs/README.md) to choose between guides.
 - **Azure CLI 2.60.0+ for FC1** or **2.48.1+ for EP1**, with a customer-tenant user login
   in Azure public cloud.
 - Network access to GitHub, Azure, Microsoft Graph, Key Vault, and Function deployment endpoints.
+- A stable public IPv4 address for the computer running setup. Storage and Key Vault allow only
+  that address and the Function subnet. See [network access](#network-access).
 - An available Linux FC1 or EP1 region with sufficient subscription quota.
 - Provider account access and the test and activation procedure for your tenant. See
   [before deployment](../../docs/ONBOARDING.md#before-deployment).
@@ -80,6 +82,26 @@ Both plans also use storage, Key Vault, and monitoring. Review the
 Press Enter to choose FC1 interactively. Unattended runs require `-ServicePlan`.
 To change plans, deploy with a different resource prefix. For an independent endpoint, also use
 a dedicated application. Coordinate certificate continuity when sharing an application.
+
+## Network access
+
+Storage and Key Vault deny public network access by default, so the deployment satisfies Azure
+Policy rules that block storage accounts and key vaults open to every network.
+
+| Allowed source | How it reaches Storage and Key Vault |
+| --- | --- |
+| Function App | Joins subnet `functions` (`10.0.0.0/25`) in the `<prefix>-epp-vnet-<suffix>` virtual network. The subnet has Storage and Key Vault service endpoints and is delegated to `Microsoft.App/environments` for FC1 or `Microsoft.Web/serverFarms` for EP1. EP1 routes all outbound traffic through the virtual network. |
+| Computer running setup | Its public IPv4 address, detected from `https://api.ipify.org` or supplied with `-OperatorIpAddress`. Setup needs it to upload the EP1 package and to issue and read the certificate. |
+| Trusted Azure services | The `AzureServices` firewall bypass. |
+
+The virtual network and service endpoints have no separate Azure charge. Each run replaces the
+allowed IPv4 address with the address of the computer running setup; the address stays allowed
+after setup completes. Remove it from **Networking** on both resources if you don't want it kept.
+
+Use `-OperatorIpAddress` when automatic detection is blocked or returns the wrong address, for
+example behind a split-tunnel VPN. Azure Storage ignores IP rules for requests from the same Azure
+region, so Azure Cloud Shell in the deployment region can be rejected. Run setup from another
+computer or a Cloud Shell in a different region in that case.
 
 <a id="step-2---download-and-run-one-script"></a>
 ## Run setup
@@ -330,6 +352,7 @@ For deliberate replacement, use `-CertificateAction Replace` instead.
 | `-InstallPrerequisites` | Authorize installation of a missing Azure CLI Bicep component |
 | `-OutputDirectory` | Private output folder; default is `epp-output` beside the launcher |
 | `-PassThru` | Return the structured deployment result in addition to saving it |
+| `-OperatorIpAddress` | Public IPv4 address to allow through the Storage and Key Vault firewalls; detected when omitted. See [network access](#network-access). |
 | `-SourceRepository`, `-SourceRef`, `-PackageReleaseTag` | Pin [source and packages](#source-versioning) |
 
 ## Source versioning

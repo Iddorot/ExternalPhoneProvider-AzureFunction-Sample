@@ -30,7 +30,8 @@ message to the configured provider. Success confirms provider acceptance, not re
 ## Guided setup
 
 Follow the [deployment guide](docs/GETTING-STARTED.md). Setup deploys a Linux FC1 or EP1 Function
-App with storage, Key Vault, managed identities, Application Insights, and Log Analytics.
+App with storage, Key Vault, a virtual network, managed identities, Application Insights, and Log Analytics.
+Storage and Key Vault deny public network access; the Function reaches them through subnet service endpoints.
 It configures Easy Auth, application permissions, provider settings, and a versioned encryption-key
 reference. See [setup details](setup/docs/README.md).
 
