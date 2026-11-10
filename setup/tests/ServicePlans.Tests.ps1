@@ -31,6 +31,7 @@ try {
         $script:AuthError = ''
         $script:StartupError = ''
         $script:CloseError = ''
+        $script:OpenError = ''
         $script:CliVersion = '2.60.0'
         function script:Write-Host {
             param([Parameter(ValueFromPipeline)] $Object, $ForegroundColor, [switch] $NoNewline)
@@ -59,6 +60,8 @@ try {
                     return ''
                 }
                 '^functionapp restart ' { return '' }
+                '^resource update ' { return '' }
+                '^rest --method get .*/config/web\?' { return ($script:WebConfig | ConvertTo-Json -Depth 6) }
                 '^deployment sub create ' {
                     $path = $Arguments[[Array]::IndexOf($Arguments, '--parameters') + 1].Substring(1)
                     $template = $Arguments[[Array]::IndexOf($Arguments, '--template-file') + 1]
@@ -147,6 +150,7 @@ try {
             Assert ($plan.Contains('Deploy the verified package, synchronize Function triggers, and enable HTTPS ingress after Easy Auth is verified.')) 'Describe the package publication result and authentication requirement.'
             Assert ($plan.Contains('Storage and Key Vault deny public network access by default.') -and $plan.Contains($names.virtualNetwork) -and
                 $plan.Contains("public IPv4 address 203.0.113.10")) 'The approval must disclose the network restrictions, virtual network, and allowed operator address.'
+            Assert ($plan.Contains('denies unmatched requests and allows only: AzureActiveDirectory')) 'The approval must disclose the endpoint caller allowlist.'
             $script:Calls.Clear()
             Assert-EppServicePlanLocation -Inputs $inputs
             Assert ($script:Calls.Count -eq 1) 'Availability must check only the selected plan.'
@@ -226,6 +230,34 @@ try {
         Assert ($flexProviders -contains 'Microsoft.Network' -and $premiumProviders -contains 'Microsoft.Network') 'Both plans need the virtual network provider.'
         Assert ($flexProviders -contains 'Microsoft.App' -and $premiumProviders -notcontains 'Microsoft.App') 'Only Flex needs the Microsoft.App subnet delegation provider.'
 
+        $rules = @(ConvertTo-EppCallerAccessRules -AllowedCallers @('AzureActiveDirectory', '203.0.113.0/24', '198.51.100.7', 'AzureActiveDirectory'))
+        Assert ($rules.Count -eq 3) 'Deduplicate caller entries.'
+        Assert ($rules[0].tag -ceq 'ServiceTag' -and $rules[0].ipAddress -ceq 'AzureActiveDirectory' -and $rules[0].priority -eq 100) 'Service tags become ServiceTag allow rules.'
+        Assert ($rules[1].ipAddress -ceq '203.0.113.0/24' -and -not $rules[1].Contains('tag') -and $rules[2].ipAddress -ceq '198.51.100.7/32') 'Addresses become CIDR allow rules.'
+        Assert (@($rules | Where-Object action -cne 'Allow').Count -eq 0 -and $rules[2].priority -eq 120) 'Rules allow callers in order.'
+        Assert-Throws { ConvertTo-EppCallerAccessRules -AllowedCallers @() } 'at least one'
+        Assert-Throws { ConvertTo-EppCallerAccessRules -AllowedCallers @('10.0.0.0/8') } 'not a public IPv4 address'
+        Assert-Throws { ConvertTo-EppCallerAccessRules -AllowedCallers @('203.0.113.0/4') } '/8 to /32'
+        Assert-Throws { ConvertTo-EppCallerAccessRules -AllowedCallers @('bad tag!') } 'service tag or a public IPv4'
+
+        $siteId = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Web/sites/app'
+        $script:Calls.Clear()
+        $script:WebConfig = @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; ipSecurityRestrictions = @(@{ action = 'Allow'; ipAddress = 'AzureActiveDirectory' }) } }
+        Set-EppPublicAccess -SiteId $siteId -SubscriptionId s -Access Enabled
+        Assert ($script:Calls[0].Contains('--set properties.publicNetworkAccess=Enabled --set properties.siteConfig.ipSecurityRestrictionsDefaultAction=Deny')) 'Open ingress together with the deny default.'
+        Assert ($script:Calls.Count -eq 2 -and $script:Calls[1] -like 'rest --method get *config/web*') 'Read back the access restrictions after opening ingress.'
+        $script:Calls.Clear()
+        Set-EppPublicAccess -SiteId $siteId -SubscriptionId s -Access Disabled
+        Assert ($script:Calls.Count -eq 1 -and $script:Calls[0].Contains('publicNetworkAccess=Disabled')) 'Closing ingress needs no read-back.'
+        foreach ($unsafe in @(
+            @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Allow'; ipSecurityRestrictions = @(@{ action = 'Allow' }) } },
+            @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny'; ipSecurityRestrictions = @(@{ action = 'Deny' }) } },
+            @{ properties = @{ ipSecurityRestrictionsDefaultAction = 'Deny' } })) {
+            $script:WebConfig = $unsafe; $script:Calls.Clear()
+            Assert-Throws { Set-EppPublicAccess -SiteId $siteId -SubscriptionId s -Access Enabled } 'setup closed it again'
+            Assert ($script:Calls[-1].Contains('publicNetworkAccess=Disabled')) 'Close ingress when its restrictions cannot be confirmed.'
+        }
+
         function script:Assert-EppAuthentication {
             param($SiteId, $Inputs, $Context, $IdentifierUri)
             $script:Calls.Add('authentication')
@@ -234,6 +266,7 @@ try {
         function script:Set-EppPublicAccess {
             param($SiteId, $SubscriptionId, $Access)
             $script:Calls.Add("ingress:$Access")
+            if ($Access -eq 'Enabled' -and $script:OpenError) { throw $script:OpenError }
             if ($Access -eq 'Disabled' -and $script:CloseError) { throw $script:CloseError }
         }
         function script:Sync-EppFunctionTriggers { param($SiteId, $SubscriptionId); $script:Calls.Add('triggers') }
@@ -296,6 +329,10 @@ try {
             $script:CloseError = 'close-rejected'
             Assert-Throws { Publish-EppFunction @publish } 'public ingress could not be disabled'
             $script:StartupError = ''; $script:CloseError = ''
+            $script:OpenError = 'RequestDisallowedByPolicy'; $script:Calls.Clear()
+            Assert-Throws { Publish-EppFunction @publish } '^RequestDisallowedByPolicy$'
+            Assert ($script:Calls -notcontains 'ingress:Disabled') 'Do not try to close ingress that was never opened.'
+            $script:OpenError = ''
         }
 
         function script:Get-EppGraphOperator { param($Inputs); return @{ Id = 'operator' } }
@@ -313,6 +350,8 @@ try {
             Assert ($script:Activities -contains 'Deploying Azure resources') 'ARM deployment must use the shared activity indicator.'
             Assert ($script:DeploymentParameters.servicePlan.value -ceq $id) 'The approved plan must be passed to Bicep.'
             Assert ($script:DeploymentParameters.operatorIpAddress.value -ceq '203.0.113.10') 'The approved operator address must be passed to Bicep.'
+            $callerRules = @($script:DeploymentParameters.callerAccessRules.value)
+            Assert ($callerRules.Count -eq 1 -and $callerRules[0].ipAddress -ceq 'AzureActiveDirectory' -and $callerRules[0].tag -ceq 'ServiceTag') 'Default to the AzureActiveDirectory caller rule.'
             foreach ($setting in @('EPP_PROVIDER_SMS_ENDPOINT', 'EPP_PROVIDER_VOICE_ENDPOINT', 'EPP_PROVIDER_TENANT_ID', 'EPP_PROVIDER_SCOPE')) {
                 Assert ($script:DeploymentParameters.providerSettings.value[$setting] -ceq $provider.Settings[$setting]) 'Approved endpoints and OAuth settings must be passed to Bicep.'
             }
@@ -346,6 +385,8 @@ try {
             Assert ($functionAppConfig.Contains("'deployment', createObject('storage', createObject('type', 'blobContainer'") -and $functionAppConfig.Contains("reference(resourceId('Microsoft.Storage/storageAccounts', parameters('resourceNames').storageAccount), '2023-05-01').primaryEndpoints.blob")) 'Flex must retain its deployment container and storage endpoint lookup.'
             Assert ($inner.variables.functionSubnetId -ceq "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('resourceNames').virtualNetwork, 'functions')]" -and
                 $site.virtualNetworkSubnetId -ceq "[variables('functionSubnetId')]") 'The Function App must join the delegated subnet.'
+            Assert ($site.siteConfig.Contains("'ipSecurityRestrictionsDefaultAction', 'Deny', 'ipSecurityRestrictions', parameters('callerAccessRules')") -and
+                $site.siteConfig.Contains("'scmIpSecurityRestrictionsUseMain', false(), 'scmIpSecurityRestrictionsDefaultAction', 'Deny', 'scmIpSecurityRestrictions', variables('operatorAccessRules')")) 'Deny unmatched site and SCM requests, allowing approved callers and the operator.'
             Assert ($site.siteConfig.Contains("'vnetRouteAllEnabled', true()")) 'Premium must route all outbound traffic through the virtual network.'
             Assert ($inner.variables.subnetDelegation -ceq "[if(variables('isFlexConsumption'), 'Microsoft.App/environments', 'Microsoft.Web/serverFarms')]") 'Delegate the subnet for the selected plan.'
             $subnet = (($inner.resources | Where-Object type -eq 'Microsoft.Network/virtualNetworks').properties.subnets)[0].properties

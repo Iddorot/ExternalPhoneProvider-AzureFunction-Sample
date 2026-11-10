@@ -56,6 +56,9 @@
 .PARAMETER OperatorIpAddress
     Public IPv4 address that Storage and Key Vault allow so setup can upload the package and manage
     the certificate. Both deny other public traffic. Detected from https://api.ipify.org when omitted.
+.PARAMETER AllowedCallers
+    Azure service tags or public IPv4 addresses/ranges allowed to call the Function endpoint.
+    Unmatched requests are denied. Defaults to the AzureActiveDirectory service tag.
 .EXAMPLE
     .\Setup-Epp.ps1
 .EXAMPLE
@@ -83,6 +86,7 @@ param(
     [string] $SourceRef = 'main',
     [string] $PackageReleaseTag,
     [string] $OperatorIpAddress,
+    [string[]] $AllowedCallers,
     [switch] $NonInteractive,
     [switch] $InstallPrerequisites,
     [switch] $ForceAuthentication,

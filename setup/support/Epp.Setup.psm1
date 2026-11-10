@@ -8,6 +8,7 @@ $script:EppInvokeAppRoleId = 'ddf32018-9212-41c7-b73c-f5dfe73a2f24'
 $script:EppInvokeAppRoleValue = 'Epp.Invoke'
 $script:EppCertificateName = 'phone-provider-encryption'
 $script:EppCertificateSubject = 'CN=ExternalPhoneProvider'
+$script:EppDefaultAllowedCallers = @('AzureActiveDirectory')
 $script:KeyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 . (Join-Path $PSScriptRoot 'Epp.Packages.ps1')
 . (Join-Path $PSScriptRoot 'Epp.Graph.ps1')
@@ -538,6 +539,30 @@ function Assert-EppOperatorIpAddress {
         throw "'$value' is not a public IPv4 address. Storage and Key Vault firewalls accept only public addresses."
     }
     return $value
+}
+
+function ConvertTo-EppCallerAccessRules {
+    param([string[]] $AllowedCallers)
+
+    $entries = @($AllowedCallers | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if (-not $entries.Count) { throw 'AllowedCallers needs at least one service tag or public IPv4 address/range.' }
+    if ($entries.Count -gt 20) { throw 'AllowedCallers accepts at most 20 entries.' }
+    $priority = 100
+    foreach ($entry in $entries) {
+        if ($entry -match '^(?<ip>[0-9.]+)(/(?<prefix>[0-9]{1,2}))?$') {
+            $prefixText = $Matches['prefix']
+            $ip = Assert-EppOperatorIpAddress $Matches['ip']
+            $prefix = if ($prefixText) { [int]$prefixText } else { 32 }
+            if ($prefix -lt 8 -or $prefix -gt 32) { throw "AllowedCallers range '$entry' must use a /8 to /32 prefix." }
+            $rule = [ordered]@{ name = "Allow $ip/$prefix"; action = 'Allow'; priority = $priority; ipAddress = "$ip/$prefix" }
+        }
+        elseif ($entry -cmatch '^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z0-9]+)?$') {
+            $rule = [ordered]@{ name = "Allow $entry".Substring(0, [Math]::Min(32, "Allow $entry".Length)); action = 'Allow'; priority = $priority; tag = 'ServiceTag'; ipAddress = $entry }
+        }
+        else { throw "AllowedCallers entry '$entry' must be an Azure service tag or a public IPv4 address/range." }
+        $rule
+        $priority += 10
+    }
 }
 
 function Resolve-EppOperatorIpAddress {
@@ -1534,6 +1559,10 @@ function Show-EppPlan {
 
     Write-Host "`nNetwork access" -ForegroundColor Cyan
     Write-Host '  - Storage and Key Vault deny public network access by default.'
+    $callers = @(if ($Inputs['AllowedCallers']) { $Inputs.AllowedCallers } else { $script:EppDefaultAllowedCallers })
+    Write-Host "  - The Function endpoint denies unmatched requests and allows only: $($callers -join ', ')."
+    Write-Host '      Microsoft does not publish the addresses Entra uses to call phone providers. Verify with an evaluation request.' -ForegroundColor Yellow
+    Write-Host '  - The Function deployment (SCM) endpoint allows only the setup computer.'
     Write-Host "  - The Function App joins subnet 'functions' in $($Names.virtualNetwork) and reaches Storage and Key Vault through service endpoints."
     if ($Inputs['OperatorIpAddress']) {
         Write-Host "  - Allow this computer's public IPv4 address $($Inputs.OperatorIpAddress) so setup can upload the package and manage the certificate."
@@ -2405,8 +2434,21 @@ function Assert-EppAuthentication {
 function Set-EppPublicAccess {
     param([string] $SiteId, [string] $SubscriptionId, [ValidateSet('Enabled', 'Disabled')][string] $Access)
 
+    # Send the deny default in the same request: Azure Policy can reject public access without it.
     Invoke-EppAz resource update --ids $SiteId --api-version 2024-04-01 --set "properties.publicNetworkAccess=$Access" `
+        --set 'properties.siteConfig.ipSecurityRestrictionsDefaultAction=Deny' `
         --subscription $SubscriptionId --output none | Out-Null
+    if ($Access -eq 'Disabled') { return }
+    $config = Invoke-EppAz rest --method get --url "https://management.azure.com$SiteId/config/web?api-version=2024-04-01" `
+        --subscription $SubscriptionId --output json | ConvertFrom-Json -AsHashtable
+    $properties = if ($config -is [Collections.IDictionary]) { $config['properties'] } else { $null }
+    $allowRules = @(if ($properties -is [Collections.IDictionary]) {
+        @($properties['ipSecurityRestrictions']) | Where-Object { $_ -is [Collections.IDictionary] -and $_['action'] -eq 'Allow' }
+    })
+    if ($properties -isnot [Collections.IDictionary] -or $properties['ipSecurityRestrictionsDefaultAction'] -ne 'Deny' -or -not $allowRules.Count) {
+        Set-EppPublicAccess -SiteId $SiteId -SubscriptionId $SubscriptionId -Access Disabled
+        throw 'Public ingress was enabled without the approved access restrictions, so setup closed it again. Inspect the Function App access restrictions.'
+    }
 }
 
 function Set-EppPackageSettings {
@@ -2546,6 +2588,7 @@ function Invoke-EppDeployment {
         language = @{ value = $Inputs.Language }
         remoteBuild = @{ value = [bool]$Package.RequiresRemoteBuild }
         operatorIpAddress = @{ value = [string]$Inputs['OperatorIpAddress'] }
+        callerAccessRules = @{ value = @(ConvertTo-EppCallerAccessRules -AllowedCallers $(if ($Inputs['AllowedCallers']) { $Inputs.AllowedCallers } else { $script:EppDefaultAllowedCallers })) }
         servicePlan = @{ value = $Inputs.ServicePlan }
     }
     $parameterPath = Join-Path $WorkingDirectory 'deployment.parameters.json'
@@ -2645,8 +2688,8 @@ function Publish-EppFunction {
     try {
         Assert-EppAuthentication -SiteId $SiteId -Inputs $Inputs -Context $Context -IdentifierUri $Outputs.identifierUri.value
         if ($Inputs.ServicePlan -eq 'FC1') {
-            $ingressOpened = $true
             Set-EppPublicAccess -SiteId $SiteId -SubscriptionId $Inputs.SubscriptionId -Access Enabled
+            $ingressOpened = $true
             if ($Package.RequiresRemoteBuild) {
                 Write-Host 'Azure installs Python dependencies and prepares the Function deployment package. No local Python installation is required.'
             }
@@ -2660,8 +2703,8 @@ function Publish-EppFunction {
         else {
             $packagePath = $Package.Path
             if ($Package.RequiresRemoteBuild) {
-                $ingressOpened = $true
                 Set-EppPublicAccess -SiteId $SiteId -SubscriptionId $Inputs.SubscriptionId -Access Enabled
+                $ingressOpened = $true
                 $packagePath = Build-EppPythonPackage -Inputs $Inputs -Names $Names -SiteId $SiteId -SourcePath $Package.Path -Directory $Directory
                 $deployedHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
             }
@@ -2680,8 +2723,8 @@ function Publish-EppFunction {
                 Set-EppPackageSettings -SiteId $SiteId -SubscriptionId $Inputs.SubscriptionId -PackageUrl $packageUrl -Directory $Directory
             }
             if (-not $ingressOpened) {
-                $ingressOpened = $true
                 Set-EppPublicAccess -SiteId $SiteId -SubscriptionId $Inputs.SubscriptionId -Access Enabled
+                $ingressOpened = $true
             }
             Invoke-EppAz -Activity 'Starting the Azure Function' functionapp restart --resource-group $Names.resourceGroup --name $Names.functionApp `
                 --subscription $Inputs.SubscriptionId --output none | Out-Null
@@ -2771,6 +2814,9 @@ function Invoke-EppSetup {
     .PARAMETER OperatorIpAddress
         Public IPv4 address allowed through the Storage and Key Vault firewalls while setup runs.
         Detected automatically from https://api.ipify.org when omitted.
+    .PARAMETER AllowedCallers
+        Azure service tags or public IPv4 addresses/ranges allowed to call the Function endpoint.
+        Unmatched requests are denied. Defaults to the AzureActiveDirectory service tag.
     .PARAMETER ForceAuthentication
         Explicitly request a new Azure CLI device-code sign-in. Omit in Cloud Shell to reuse
         its existing login. Graph always uses the resulting CLI session, never a separate SDK login.
@@ -2809,6 +2855,7 @@ function Invoke-EppSetup {
         [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$')]
         [string] $SourceRepository = 'Iddorot/ExternalPhoneProvider-AzureFunction-Sample',
         [string] $OperatorIpAddress,
+        [string[]] $AllowedCallers,
         [switch] $NonInteractive, [switch] $InstallPrerequisites,
         [switch] $ForceAuthentication, [switch] $ApproveDeployment, [switch] $PassThru
     )
@@ -2915,6 +2962,8 @@ function Invoke-EppSetup {
         $inputs.PackageUrl = $selection.Url
         $inputs.PackageReleaseTag = $selection.ReleaseTag
         $inputs.OperatorIpAddress = Resolve-EppOperatorIpAddress -OperatorIpAddress $OperatorIpAddress
+        $inputs.AllowedCallers = @(if ($AllowedCallers) { $AllowedCallers } else { $script:EppDefaultAllowedCallers })
+        $null = @(ConvertTo-EppCallerAccessRules -AllowedCallers $inputs.AllowedCallers)
         Invoke-EppAz bicep build --file (Join-Path $assetDirectory 'infra/main.bicep') `
             --outfile (Join-Path $assetDirectory 'main.json') | Out-Null
         Show-EppPlan -Inputs $inputs -Names $names -ProviderConfiguration $providerConfiguration -Context $context

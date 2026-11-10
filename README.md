@@ -19,6 +19,9 @@ JavaScript is the default.
 >   through subnet **service endpoints**.
 > - Only the computer running setup is allowed in, by its public IPv4 address, so it can upload
 >   the package and manage the certificate. Set it with `-OperatorIpAddress` or let setup detect it.
+> - The Function endpoint **denies unmatched requests** and allows only `-AllowedCallers`
+>   (default: the `AzureActiveDirectory` service tag). Its deployment endpoint allows only the
+>   computer running setup. Easy Auth still checks every caller's token.
 >
 > Setup scripts and Function packages download from this repository, not the Microsoft one.
 > See [network access](setup/docs/README.md#network-access) for details.

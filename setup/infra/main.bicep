@@ -15,6 +15,8 @@ param language string
 param remoteBuild bool
 @description('Public IPv4 address of the setup operator, allowed through the Storage and Key Vault firewalls.')
 param operatorIpAddress string = ''
+@description('App Service access-restriction allow rules for callers of the endpoint.')
+param callerAccessRules array
 @allowed(['FC1', 'EP1'])
 param servicePlan string = 'EP1'
 
@@ -48,6 +50,7 @@ module endpoint 'resources.bicep' = {
     language: language
     remoteBuild: remoteBuild
     operatorIpAddress: operatorIpAddress
+    callerAccessRules: callerAccessRules
     servicePlan: servicePlan
   }
 }

@@ -166,6 +166,9 @@ Storage and Key Vault deny public network access by default. See [network access
 | `AuthorizationFailure` or `ForbiddenByFirewall` after the infrastructure stage | Setup retries for about two minutes while network rules apply. If it still fails, the computer's public IPv4 address differs from the one in the plan. Rerun with the correct `-OperatorIpAddress`, or run from another computer. |
 | Rejected from Azure Cloud Shell | Storage ignores IP rules for requests from the same Azure region. Run setup from a computer outside Azure or a Cloud Shell in another region. |
 | Rerun from a new address fails while reading an existing certificate | The previous address is still the one allowed. Add the new address under **Key Vault** > **Networking**, or run from the original computer. |
+| `RequestDisallowedByPolicy` for the Function App while opening ingress | Rerun with the current setup source. It opens ingress only with access restrictions that deny unmatched requests. |
+| Microsoft's requests are rejected with `403 Ip Forbidden`, or never reach the Function | The caller allowlist doesn't match Microsoft's source addresses. Rerun setup with the right `-AllowedCallers`. |
+| `AuthorizationFailed` for `Microsoft.Web/sites/write` | Your Azure role no longer allows changing the Function App. Check that your Contributor or Owner assignment (or PIM activation) is still active, then rerun. |
 | Function can't start or resolve Key Vault references | Confirm the Function App is integrated with subnet `functions` and that the subnet keeps its Storage and Key Vault service endpoints. |
 
 ## Certificate selection, reuse, or cleanup fails
